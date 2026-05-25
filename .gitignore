@@ -1,0 +1,7 @@
+# Ignorar entornos virtuales
+env/
+venv/
+__pycache__/
+
+data/raw/
+results/
