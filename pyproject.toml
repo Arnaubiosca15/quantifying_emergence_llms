@@ -1,0 +1,63 @@
+[project]
+name = "quantifying-emergence-llms"
+version = "0.1.0"
+description = "Quantifying emergence in LLMs using causal emergence and EI"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    # Core ML
+    "torch>=2.0",
+    "transformers>=4.30",
+
+    # Numerical / scientific
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+
+    # Data / IO
+    "pandas>=2.0",
+    "datasets>=2.14",       # Used internally by Easy-Transformer (IOIDataset)
+
+    # Visualisation
+    "matplotlib>=3.7",
+    "seaborn>=0.12",        # Used in nim_inference_and_ei*.py — MISSING from original requirements.txt
+
+    # Utilities
+    "tqdm>=4.65",
+    "einops>=0.6",          # Required by Easy-Transformer internally
+    "fancy-einsum>=0.0.3",  # Required by Easy-Transformer internally
+]
+
+# ---------------------------------------------------------------------------
+# IMPORTANT — easy_transformer is NOT a pip package.
+#
+# `easy-transformer` was removed from PyPI; its successor is `transformer-lens`
+# (pip install transformer-lens), but the API is different.
+#
+# The code expects a local clone injected via sys.path:
+#
+#   <project_root>/external/Easy-Transformer/
+#
+# Clone it with:
+#   mkdir -p external
+#   git clone https://github.com/neelnanda-io/Easy-Transformer.git external/Easy-Transformer
+#
+# If you want to migrate to the modern API instead, replace:
+#   from easy_transformer.EasyTransformer import EasyTransformer
+# with:
+#   from transformer_lens import HookedTransformer
+# and update the model-loading calls accordingly. In that case, add
+# "transformer-lens>=1.0" to the dependencies list above and remove the clone.
+# ---------------------------------------------------------------------------
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# Exclude CUDA-specific nvidia sub-packages from resolution —
+# uv/torch will pull the correct CUDA extras automatically based on your system.
+# Do NOT list nvidia-* packages manually; that's what caused the original breakage.
+
+[tool.uv.sources]
+# No custom sources needed once the Easy-Transformer clone is in place.
