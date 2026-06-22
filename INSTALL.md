@@ -48,6 +48,9 @@ Or activate the environment manually:
 source .venv/bin/activate
 python experiments/nis_experiments/single_head_run.py
 ```
+## Data and results
+These folders are automatically created when executing the code.
+
 
 ---
 
