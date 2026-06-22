@@ -40,14 +40,9 @@ dependencies = [
 #
 # Clone it with:
 #   mkdir -p external
-#   git clone https://github.com/neelnanda-io/Easy-Transformer.git external/Easy-Transformer
+#   git clone https://github.com/redwoodresearch/Easy-Transformer
 #
-# If you want to migrate to the modern API instead, replace:
-#   from easy_transformer.EasyTransformer import EasyTransformer
-# with:
-#   from transformer_lens import HookedTransformer
-# and update the model-loading calls accordingly. In that case, add
-# "transformer-lens>=1.0" to the dependencies list above and remove the clone.
+
 # ---------------------------------------------------------------------------
 
 [build-system]
@@ -55,9 +50,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-# Exclude CUDA-specific nvidia sub-packages from resolution —
-# uv/torch will pull the correct CUDA extras automatically based on your system.
-# Do NOT list nvidia-* packages manually; that's what caused the original breakage.
+
 
 [tool.uv.sources]
-# No custom sources needed once the Easy-Transformer clone is in place.
