@@ -1,6 +1,7 @@
 # Ignorar entornos virtuales
 env/
 venv/
+.venv/
 __pycache__/
 
 data/raw/
