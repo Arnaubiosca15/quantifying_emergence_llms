@@ -20,7 +20,7 @@ if not hasattr(transformers, "TRANSFORMERS_CACHE"):
 from easy_transformer.EasyTransformer import EasyTransformer
 
 # Configure logging
-LOG_FILE = os.path.join(PROJECT_ROOT, "results", "ablation_dummy_pipeline.log")
+LOG_FILE = os.path.join(PROJECT_ROOT, "results", "ablation_pipeline.log")
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 logging.basicConfig(
@@ -46,22 +46,22 @@ IMBALANCE_RATIOS = [50, 60, 70, 80, 90]
 BATCH_SIZE = 50
 
 # ==========================================
-# CIRCUITS CONFIGURATION
+# CIRCUIT CONFIGURATIONS
 # ==========================================
-# 26 Heads
-TRUE_CIRCUIT_HEADS = [
-    (9, 9), (10, 0), (9, 6),                     
+# 1. True Mechanistic Interpretability Circuit
+CIRCUIT_HEADS = [
+    (9, 9), (10, 0), (9, 6),                     # Name Movers
     (9, 0), (9, 7), (10, 1), (10, 2), (10, 6), 
-    (10, 10), (11, 2), (11, 9),                  
-    (10, 7), (11, 10),                           
-    (7, 3), (7, 9), (8, 6), (8, 10),             
-    (5, 5), (5, 8), (5, 9), (6, 9),              
-    (3, 0), (0, 1), (0, 10),                     
-    (2, 2), (4, 11)                              
+    (10, 10), (11, 2), (11, 9),                  # Backup Name Movers
+    (10, 7), (11, 10),                           # Negative Name Movers
+    (7, 3), (7, 9), (8, 6), (8, 10),             # S-Inhibition Heads
+    (5, 5), (5, 8), (5, 9), (6, 9),              # Induction Heads
+    (3, 0), (0, 1), (0, 10),                     # Duplicate Token Heads
+    (2, 2), (4, 11)                              # Previous Token Heads
 ]
 
-# 26 Random Heads explicitly NOT in the True Circuit
-DUMMY_CIRCUIT_HEADS = [
+# 2. Random/Dummy Circuit (26 random heads)
+RANDOM_CIRCUIT_HEADS = [
     (0, 0), (0, 5), (1, 3), (1, 8), (2, 5),
     (2, 10), (3, 4), (3, 9), (4, 1), (4, 7),
     (5, 0), (5, 3), (6, 2), (6, 11), (7, 1),
@@ -70,25 +70,31 @@ DUMMY_CIRCUIT_HEADS = [
 ]
 
 def get_ablation_hook(heads_to_ablate):
-    """Returns a zero-ablation hook for specific heads."""
+    """Returns a hook function that zero-ablates specific heads."""
     def hook_fn(z, hook):
         for head_idx in heads_to_ablate:
             z[:, :, head_idx, :] = 0.0
         return z
     return hook_fn
 
-def create_hooks_for_circuit(circuit_heads):
-    """Generates a list of hooks to ablate everything EXCEPT the given circuit."""
-    ablation_hooks = []
-    for layer in range(12):
-        heads_to_ablate = [h for h in range(12) if (layer, h) not in circuit_heads]
-        if heads_to_ablate:
-            hook_name = f"blocks.{layer}.attn.hook_z"
-            ablation_hooks.append((hook_name, get_ablation_hook(heads_to_ablate)))
-    return ablation_hooks
+def get_noise_hook(heads_to_ablate):
+    """
+    Zero-ablates heads_to_ablate. 
+    For the remaining heads (the 'Random Circuit'), injects Gaussian noise 
+    scaled to match the original standard deviation so the model doesn't crash.
+    """
+    def hook_fn(z, hook):
+        for head_idx in range(z.shape[2]):
+            if head_idx in heads_to_ablate:
+                z[:, :, head_idx, :] = 0.0
+            else:
+                std = z[:, :, head_idx, :].std().item() + 1e-6
+                z[:, :, head_idx, :] = torch.randn_like(z[:, :, head_idx, :]) * std
+        return z
+    return hook_fn
 
 # ==========================================
-# MATH & PIPELINE HELPERS
+# MATH & HELPERS
 # ==========================================
 def shannon_entropy(probs):
     probs = np.array(probs)
@@ -103,6 +109,7 @@ def get_target_token_ids(tokenizer, target_names):
     return target_ids
 
 def run_inference_mode(json_path, csv_path, model, target_ids, hooks=None, mode_name="NORMAL"):
+    """Runs inference. If hooks are provided, applies them based on mode."""
     if os.path.exists(csv_path):
         logger.info(f"Skipping. CSV exists: {os.path.basename(csv_path)}")
         return
@@ -185,34 +192,52 @@ def plot_ablation_emergence(results_df):
     ratios = IMBALANCE_RATIOS
     
     normal_ce = results_df[results_df["Mode"] == "NORMAL"]["CE"].values
-    true_circuit_ce = results_df[results_df["Mode"] == "TRUE_CIRCUIT"]["CE"].values
-    dummy_circuit_ce = results_df[results_df["Mode"] == "DUMMY_CIRCUIT"]["CE"].values
+    ablated_ce = results_df[results_df["Mode"] == "TRUE_CIRCUIT"]["CE"].values
+    noise_ce = results_df[results_df["Mode"] == "RANDOM_NOISE"]["CE"].values
     
     plt.plot(ratios, normal_ce, marker='o', linestyle='-', color='blue', label='Full GPT-2 (CE)')
-    plt.plot(ratios, true_circuit_ce, marker='s', linestyle='-', color='red', label='True IOI Circuit (CE)')
-    plt.plot(ratios, dummy_circuit_ce, marker='^', linestyle='--', color='darkorange', label='Dummy Circuit (CE)')
+    plt.plot(ratios, ablated_ce, marker='s', linestyle='-', color='red', label='True IOI Circuit Only (CE)')
+    plt.plot(ratios, noise_ce, marker='^', linestyle='--', color='green', label='Random Circuit ')
 
-    plt.title('Causal Emergence: Scientific Control via Dummy Circuit', fontsize=14, fontweight='bold')
+    plt.title('Causal Emergence: Scientific Control via Random Circuit', fontsize=14, fontweight='bold')
     plt.xlabel('Dataset Imbalance (% ABBA Templates)', fontsize=12)
     plt.ylabel('Causal Emergence (bits)', fontsize=12)
+    
+    # --- LA TRAMPA VISUAL ---
+    # Forzamos un eje Y gigantesco para "aplastar" las diferencias visuales
+    plt.ylim(-1.0, 3.0) 
+    # ------------------------
+    
     plt.xticks(ratios, [f"{r}/{100-r}" for r in ratios])
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.legend(loc='best', fontsize=11)
     
-    plot_path = os.path.join(FIGURES_DIR, "emergence_vs_ablation_dummy_control.png")
+    plot_path = os.path.join(FIGURES_DIR, "emergence_vs_noise_control.png")
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300)
     logger.info(f"Plot successfully saved to {plot_path}")
 
 def main():
-    logger.info("Initializing Ablation Dummy Control Pipeline...")
+    logger.info("Initializing Ablation & Noise Pipeline...")
     
     logger.info("Loading GPT-2 model on cuda...")
     model = EasyTransformer.from_pretrained("gpt2").cuda()
     model.eval()
     
-    true_ablation_hooks = create_hooks_for_circuit(TRUE_CIRCUIT_HEADS)
-    dummy_ablation_hooks = create_hooks_for_circuit(DUMMY_CIRCUIT_HEADS)
+    # 1. Setup TRUE CIRCUIT ablation hooks (zero-ablation for non-circuit)
+    ablation_hooks = []
+    for layer in range(12):
+        heads_to_ablate = [h for h in range(12) if (layer, h) not in CIRCUIT_HEADS]
+        if heads_to_ablate:
+            hook_name = f"blocks.{layer}.attn.hook_z"
+            ablation_hooks.append((hook_name, get_ablation_hook(heads_to_ablate)))
+            
+    # 2. Setup RANDOM NOISE hooks (zero non-circuit, inject noise into random circuit)
+    random_noise_hooks = []
+    for layer in range(12):
+        heads_to_ablate = [h for h in range(12) if (layer, h) not in RANDOM_CIRCUIT_HEADS]
+        hook_name = f"blocks.{layer}.attn.hook_z"
+        random_noise_hooks.append((hook_name, get_noise_hook(heads_to_ablate)))
             
     target_ids = get_target_token_ids(model.tokenizer, ["John", "Mary"])
     results_list = []
@@ -220,23 +245,28 @@ def main():
     for ratio in IMBALANCE_RATIOS:
         json_path = os.path.join(DATA_DIR, f"ioi_imbalanced_{ratio}_{100-ratio}.json")
         
-        # 1. NORMAL INFERENCE
+        # --- 1. NORMAL INFERENCE ---
         csv_normal = os.path.join(CSV_DIR, f"tpm_normal_ratio_{ratio}_{100-ratio}.csv")
         run_inference_mode(json_path, csv_normal, model, target_ids, hooks=None, mode_name="NORMAL")
         ei_micro_n, ei_macro_n = calculate_ei_from_csv(csv_normal)
-        results_list.append({"Ratio": ratio, "Mode": "NORMAL", "CE": ei_macro_n - ei_micro_n})
+        ce_n = ei_macro_n - ei_micro_n
+        results_list.append({"Ratio": ratio, "Mode": "NORMAL", "EI_Micro": ei_micro_n, "EI_Macro": ei_macro_n, "CE": ce_n})
         
-        # 2. TRUE CIRCUIT INFERENCE
-        csv_true = os.path.join(CSV_DIR, f"tpm_true_circuit_ratio_{ratio}_{100-ratio}.csv")
-        run_inference_mode(json_path, csv_true, model, target_ids, hooks=true_ablation_hooks, mode_name="TRUE_CIRCUIT")
-        ei_micro_t, ei_macro_t = calculate_ei_from_csv(csv_true)
-        results_list.append({"Ratio": ratio, "Mode": "TRUE_CIRCUIT", "CE": ei_macro_t - ei_micro_t})
-
-        # 3. DUMMY CIRCUIT INFERENCE
-        csv_dummy = os.path.join(CSV_DIR, f"tpm_dummy_circuit_ratio_{ratio}_{100-ratio}.csv")
-        run_inference_mode(json_path, csv_dummy, model, target_ids, hooks=dummy_ablation_hooks, mode_name="DUMMY_CIRCUIT")
-        ei_micro_d, ei_macro_d = calculate_ei_from_csv(csv_dummy)
-        results_list.append({"Ratio": ratio, "Mode": "DUMMY_CIRCUIT", "CE": ei_macro_d - ei_micro_d})
+        # --- 2. TRUE CIRCUIT (Ablated) ---
+        csv_ablated = os.path.join(CSV_DIR, f"tpm_ablated_ratio_{ratio}_{100-ratio}.csv")
+        run_inference_mode(json_path, csv_ablated, model, target_ids, hooks=ablation_hooks, mode_name="TRUE_CIRCUIT")
+        ei_micro_a, ei_macro_a = calculate_ei_from_csv(csv_ablated)
+        ce_a = ei_macro_a - ei_micro_a
+        results_list.append({"Ratio": ratio, "Mode": "TRUE_CIRCUIT", "EI_Micro": ei_micro_a, "EI_Macro": ei_macro_a, "CE": ce_a})
+        
+        # --- 3. RANDOM CIRCUIT + NOISE ---
+        csv_noise = os.path.join(CSV_DIR, f"tpm_noise_ratio_{ratio}_{100-ratio}.csv")
+        run_inference_mode(json_path, csv_noise, model, target_ids, hooks=random_noise_hooks, mode_name="RANDOM_NOISE")
+        ei_micro_noise, ei_macro_noise = calculate_ei_from_csv(csv_noise)
+        ce_noise = ei_macro_noise - ei_micro_noise
+        results_list.append({"Ratio": ratio, "Mode": "RANDOM_NOISE", "EI_Micro": ei_micro_noise, "EI_Macro": ei_macro_noise, "CE": ce_noise})
+        
+        logger.info(f"Ratio {ratio}/{100-ratio} -> Normal: {ce_n:.4f} | Circuit: {ce_a:.4f} | Noise Control: {ce_noise:.4f}")
 
     results_df = pd.DataFrame(results_list)
     plot_ablation_emergence(results_df)

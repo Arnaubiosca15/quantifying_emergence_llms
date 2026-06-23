@@ -20,7 +20,7 @@ if not hasattr(transformers, "TRANSFORMERS_CACHE"):
 from easy_transformer.EasyTransformer import EasyTransformer
 
 # Configure logging
-LOG_FILE = os.path.join(PROJECT_ROOT, "results", "ablation_pipeline.log")
+LOG_FILE = os.path.join(PROJECT_ROOT, "results", "baseline_pipeline.log")
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 logging.basicConfig(
@@ -46,28 +46,6 @@ IMBALANCE_RATIOS = [50, 60, 70, 80, 90]
 BATCH_SIZE = 50
 
 # ==========================================
-# CIRCUIT CONFIGURATION (Mechanistic Interpretability)
-# ==========================================
-CIRCUIT_HEADS = [
-    (9, 9), (10, 0), (9, 6),                     # Name Movers
-    (9, 0), (9, 7), (10, 1), (10, 2), (10, 6), 
-    (10, 10), (11, 2), (11, 9),                  # Backup Name Movers
-    (10, 7), (11, 10),                           # Negative Name Movers
-    (7, 3), (7, 9), (8, 6), (8, 10),             # S-Inhibition Heads
-    (5, 5), (5, 8), (5, 9), (6, 9),              # Induction Heads
-    (3, 0), (0, 1), (0, 10),                     # Duplicate Token Heads
-    (2, 2), (4, 11)                              # Previous Token Heads
-]
-
-def get_ablation_hook(heads_to_ablate):
-    """Returns a hook function that zero-ablates specific heads."""
-    def hook_fn(z, hook):
-        for head_idx in heads_to_ablate:
-            z[:, :, head_idx, :] = 0.0
-        return z
-    return hook_fn
-
-# ==========================================
 # MATH & HELPERS
 # ==========================================
 def shannon_entropy(probs):
@@ -82,14 +60,13 @@ def get_target_token_ids(tokenizer, target_names):
         target_ids[name] = tokenizer.encode(space_name)[0]
     return target_ids
 
-def run_inference_mode(json_path, csv_path, model, target_ids, hooks=None):
-    """Runs inference. If hooks are provided, it applies zero-ablation."""
+def run_inference(json_path, csv_path, model, target_ids):
+    """Runs standard inference without any ablation hooks."""
     if os.path.exists(csv_path):
         logger.info(f"Skipping. CSV exists: {os.path.basename(csv_path)}")
         return
 
-    mode_name = "ABLATED" if hooks else "NORMAL"
-    logger.info(f"Running {mode_name} inference for Dataset={os.path.basename(json_path)}...")
+    logger.info(f"Running inference for Dataset={os.path.basename(json_path)}...")
     
     with open(json_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
@@ -110,10 +87,7 @@ def run_inference_mode(json_path, csv_path, model, target_ids, hooks=None):
         input_ids, attention_mask = tokens["input_ids"].cuda(), tokens["attention_mask"].cuda()
 
         with torch.no_grad():
-            if hooks:
-                logits = model.run_with_hooks(input_ids, fwd_hooks=hooks)
-            else:
-                logits = model(input_ids)
+            logits = model(input_ids)
             
         sequence_lengths = attention_mask.sum(dim=1) - 1
         batch_indices = torch.arange(len(batch)).cuda()
@@ -161,49 +135,36 @@ def calculate_ei_from_csv(csv_path):
 
     return ei_micro, ei_macro
 
-def plot_ablation_emergence(results_df):
+def plot_emergence(results_df):
     plt.figure(figsize=(10, 6))
     
     ratios = IMBALANCE_RATIOS
-    
-    normal_ce = results_df[results_df["Mode"] == "NORMAL"]["CE"].values
-    ablated_ce = results_df[results_df["Mode"] == "ABLATED"]["CE"].values
+    normal_ce = results_df["CE"].values
     
     plt.plot(ratios, normal_ce, marker='o', linestyle='-', color='blue', label='Full GPT-2 (CE)')
-    plt.plot(ratios, ablated_ce, marker='s', linestyle='-', color='red', label='IOI Circuit Only (CE)')
 
-    plt.title('Causal Emergence: Full Model vs Isolated IOI Circuit', fontsize=14, fontweight='bold')
-    plt.xlabel('Dataset Imbalance (% ABBA Templates)', fontsize=12)
+    plt.title('Causal Emergence vs Dataset Imbalance', fontsize=14, fontweight='bold')
+    plt.xlabel('Dataset Imbalance (% Mary)', fontsize=12)
     plt.ylabel('Causal Emergence (bits)', fontsize=12)
     
-    # --- AÑADE ESTA LÍNEA AQUÍ ---
-    # Forzamos un eje Y gigantesco para "aplastar" la diferencia visual entre 0.4 y 0.6
+    # Rango Y ampliado para minimizar variaciones visuales
     plt.ylim(-2.0, 5.0) 
-    # -----------------------------
     
     plt.xticks(ratios, [f"{r}/{100-r}" for r in ratios])
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.legend(loc='best', fontsize=11)
     
-    plot_path = os.path.join(FIGURES_DIR, "emergence_vs_ablation.png")
+    plot_path = os.path.join(FIGURES_DIR, "emergence_baseline_only.png")
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300)
     logger.info(f"Plot successfully saved to {plot_path}")
 
 def main():
-    logger.info("Initializing Ablation Pipeline...")
+    logger.info("Initializing Baseline Pipeline...")
     
     logger.info("Loading GPT-2 model on cuda...")
     model = EasyTransformer.from_pretrained("gpt2").cuda()
     model.eval()
-    
-    # Setup ablation hooks
-    ablation_hooks = []
-    for layer in range(12):
-        heads_to_ablate = [h for h in range(12) if (layer, h) not in CIRCUIT_HEADS]
-        if heads_to_ablate:
-            hook_name = f"blocks.{layer}.attn.hook_z"
-            ablation_hooks.append((hook_name, get_ablation_hook(heads_to_ablate)))
             
     target_ids = get_target_token_ids(model.tokenizer, ["John", "Mary"])
     results_list = []
@@ -211,24 +172,20 @@ def main():
     for ratio in IMBALANCE_RATIOS:
         json_path = os.path.join(DATA_DIR, f"ioi_imbalanced_{ratio}_{100-ratio}.json")
         
-        # 1. NORMAL INFERENCE
         csv_normal = os.path.join(CSV_DIR, f"tpm_normal_ratio_{ratio}_{100-ratio}.csv")
-        run_inference_mode(json_path, csv_normal, model, target_ids, hooks=None)
-        ei_micro_n, ei_macro_n = calculate_ei_from_csv(csv_normal)
-        ce_n = ei_macro_n - ei_micro_n
-        results_list.append({"Ratio": ratio, "Mode": "NORMAL", "EI_Micro": ei_micro_n, "EI_Macro": ei_macro_n, "CE": ce_n})
         
-        # 2. ABLATED INFERENCE (Only IOI Circuit)
-        csv_ablated = os.path.join(CSV_DIR, f"tpm_ablated_ratio_{ratio}_{100-ratio}.csv")
-        run_inference_mode(json_path, csv_ablated, model, target_ids, hooks=ablation_hooks)
-        ei_micro_a, ei_macro_a = calculate_ei_from_csv(csv_ablated)
-        ce_a = ei_macro_a - ei_micro_a
-        results_list.append({"Ratio": ratio, "Mode": "ABLATED", "EI_Micro": ei_micro_a, "EI_Macro": ei_macro_a, "CE": ce_a})
+        # Inferencia única (sin hooks)
+        run_inference(json_path, csv_normal, model, target_ids)
         
-        logger.info(f"Ratio {ratio}/{100-ratio} -> Normal CE: {ce_n:.4f} | Ablated CE: {ce_a:.4f}")
+        # Cálculo de Efectividad y Emergencia
+        ei_micro, ei_macro = calculate_ei_from_csv(csv_normal)
+        ce = ei_macro - ei_micro
+        results_list.append({"Ratio": ratio, "EI_Micro": ei_micro, "EI_Macro": ei_macro, "CE": ce})
+        
+        logger.info(f"Ratio {ratio}/{100-ratio} -> CE: {ce:.4f}")
 
     results_df = pd.DataFrame(results_list)
-    plot_ablation_emergence(results_df)
+    plot_emergence(results_df)
 
 if __name__ == "__main__":
     main()

@@ -9,14 +9,6 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 EXTERNAL_DIR = os.path.join(PROJECT_ROOT, "external", "Easy-Transformer")
 sys.path.insert(0, EXTERNAL_DIR)
 
-# Hugging Face compatibility patch
-import transformers
-if not hasattr(transformers, "TRANSFORMERS_CACHE"):
-    transformers.TRANSFORMERS_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
-
-# Import raw dictionaries to bypass internal limits
-from easy_transformer.ioi_dataset import ABBA_TEMPLATES, BABA_TEMPLATES, NOUNS_DICT
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -30,66 +22,100 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data", "raw", "known_function")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 TOTAL_PROMPTS = 1000
-ALLOWED_NAMES = ["John", "Mary"]
-# Define the percentage of ABBA templates (imbalance ratios)
-IMBALANCE_RATIOS = [50, 60, 70, 80, 90]
+CAUSE_RATIOS = [50, 60, 70, 80, 90]   # % of prompts with IO = Mary
+SWITCH_PERC = 0.0  # Controls the fraction of prompts with swapped first-clause order
 
+# ============================================================================
+#  HARDCODED VOCABULARY AND TEMPLATES
+# ============================================================================
+PLACES = [
+    "store", "garden", "restaurant", "school",
+    "hospital", "office", "house", "station"
+]
 
-def generate_binary_prompts(templates, num_samples, prompt_type):
-    """Generates IOI prompts strictly restricted to 2 names."""
+OBJECTS = [
+    "ring", "kiss", "bone", "basketball",
+    "computer", "necklace", "drink", "snack"
+]
+
+TEMPLATES = [
+    "When [IO] and [S] went to the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "When [IO] and [S] arrived at the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "After [IO] and [S] went to the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "While [IO] and [S] were at the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "When [IO] and [S] were at the [PLACE], [S] decided to give a [OBJECT] to [IO]",
+    "After [IO] and [S] arrived at the [PLACE], [S] decided to give a [OBJECT] to [IO]",
+    "When [IO] and [S] visited the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "Once [IO] and [S] reached the [PLACE], [S] gave a [OBJECT] to [IO]",
+]
+
+TEMPLATES_SWITCHED = [
+    "When [S] and [IO] went to the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "When [S] and [IO] arrived at the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "After [S] and [IO] went to the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "While [S] and [IO] were at the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "When [S] and [IO] were at the [PLACE], [S] decided to give a [OBJECT] to [IO]",
+    "After [S] and [IO] arrived at the [PLACE], [S] decided to give a [OBJECT] to [IO]",
+    "When [S] and [IO] visited the [PLACE], [S] gave a [OBJECT] to [IO]",
+    "Once [S] and [IO] reached the [PLACE], [S] gave a [OBJECT] to [IO]",
+]
+
+def generate_prompts(ratio, total_prompts, switch_perc):
+    n_mary = int(total_prompts * (ratio / 100.0))
+    n_john = total_prompts - n_mary
+
     prompts = []
-    
-    for _ in range(num_samples):
-        template = random.choice(templates)
-        name_a, name_b = random.sample(ALLOWED_NAMES, 2)
-        
-        prompt_text = template
-        for noun_class, options in NOUNS_DICT.items():
-            if noun_class in prompt_text:
-                prompt_text = prompt_text.replace(noun_class, random.choice(options))
-        
-        prompt_text = prompt_text.replace("[A]", name_a)
-        prompt_text = prompt_text.replace("[B]", name_b)
-        
-        if prompt_type == "ABBA":
-            io_name, s_name = name_b, name_a
-        else: 
-            io_name, s_name = name_a, name_b
-            
-        prompts.append({
-            "text": prompt_text,
-            "IO": io_name,
-            "S": s_name,
-            "type": prompt_type
-        })
-        
+
+    for io_name, s_name, count in [("Mary", "John", n_mary), ("John", "Mary", n_john)]:
+        for _ in range(count):
+            place = random.choice(PLACES)
+            obj = random.choice(OBJECTS)
+            tmpl_idx = random.randrange(len(TEMPLATES))
+
+            switched = random.random() < switch_perc
+
+            if switched:
+                template = TEMPLATES_SWITCHED[tmpl_idx]
+            else:
+                template = TEMPLATES[tmpl_idx]
+
+            text = (
+                template
+                .replace("[IO]", io_name)
+                .replace("[S]", s_name)
+                .replace("[PLACE]", place)
+                .replace("[OBJECT]", obj)
+            )
+
+            prompts.append({
+                "text": text,
+                "IO": io_name,
+                "S": s_name,
+                "TEMPLATE_IDX": tmpl_idx,
+                "[PLACE]": place,
+                "[OBJECT]": obj,
+                "switched": switched
+            })
+
+    random.shuffle(prompts)
     return prompts
 
-
 def main():
-    logger.info("Initializing multi-ratio IOI generator...")
+    logger.info("Initializing Generator (Fixed Templates and Vocab)...")
     random.seed(42)
 
-    for ratio in IMBALANCE_RATIOS:
-        n_abba = int(TOTAL_PROMPTS * (ratio / 100.0))
-        n_baba = TOTAL_PROMPTS - n_abba
-        
-        logger.info(f"Generating Ratio {ratio}/{100-ratio} ({n_abba} ABBA, {n_baba} BABA)...")
-        
-        dataset_abba = generate_binary_prompts(ABBA_TEMPLATES, n_abba, "ABBA")
-        dataset_baba = generate_binary_prompts(BABA_TEMPLATES, n_baba, "BABA")
-        
-        dataset_combined = dataset_abba + dataset_baba
-        random.shuffle(dataset_combined)
-        
+    for ratio in CAUSE_RATIOS:
+        logger.info(f"Generating Ratio {ratio}/{100-ratio}...")
+
+        dataset = generate_prompts(ratio, TOTAL_PROMPTS, SWITCH_PERC)
+
         output_file = os.path.join(DATA_DIR, f"ioi_imbalanced_{ratio}_{100-ratio}.json")
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(dataset_combined, f, indent=4, ensure_ascii=False)
-            
+            json.dump(dataset, f, indent=4, ensure_ascii=False)
+
         logger.info(f"Saved -> {output_file}")
 
     logger.info("All datasets generated successfully!")
-
 
 if __name__ == "__main__":
     main()
